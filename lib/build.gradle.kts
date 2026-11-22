@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "mr.x.md3lbt"
+    namespace = "mr.x.md3lb"
     compileSdk = 36
 
     defaultConfig {
@@ -42,7 +42,7 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                groupId = "mr.x.md3lbt"
+                groupId = "mr.x.md3lb"
                 artifactId = "lib"
                 version = "1.0.0"
             }
