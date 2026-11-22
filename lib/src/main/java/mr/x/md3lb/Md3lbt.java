@@ -5,9 +5,10 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Outline;
-import android.os.AsyncTask;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.LruCache;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
@@ -24,27 +25,24 @@ import com.google.android.material.shape.ShapeAppearanceModel;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.lang.ref.WeakReference;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * MD3 JSON 轮播图库
  *
- * 支持：
- * 1. JSON 数据加载图片
- * 2. 网络图片异步加载
- * 3. 图片缓存
- * 4. MD3 边缘遮罩
- * 5. 圆角卡片
- * 6. 自动轮播
+ * 支持 JSON 加载、网络图片、多线程下载、
+ * 内存缓存、圆角遮罩和自动轮播。
  */
 public class Md3lbt {
+
+    private static final String TAG = "Md3lbt";
 
     private final Activity activity;
 
@@ -63,6 +61,8 @@ public class Md3lbt {
 
     private Runnable autoPlayRunnable;
 
+    private RecyclerView.OnScrollListener scrollListener;
+
     private int currentPosition = 0;
 
     private boolean initialized = false;
@@ -75,9 +75,6 @@ public class Md3lbt {
 
     private static final int ITEM_MARGIN_DP = 8;
 
-    /**
-     * 构造方法
-     */
     public Md3lbt(Activity activity) {
         this.activity = activity;
     }
@@ -99,7 +96,7 @@ public class Md3lbt {
     }
 
     /**
-     * 设置 MD3 轮播样式并启动
+     * 设置轮播样式并启动
      */
     public Md3lbt setStyle(
             CarouselLayoutManager layoutManager) {
@@ -112,7 +109,7 @@ public class Md3lbt {
     }
 
     /**
-     * 初始化轮播图
+     * 初始化
      */
     private void initialize() {
 
@@ -120,6 +117,7 @@ public class Md3lbt {
                 recyclerView == null ||
                 layoutManager == null ||
                 jsonData == null) {
+
             throw new IllegalStateException(
                     "请先设置 JSON、RecyclerView 和 LayoutManager"
             );
@@ -137,7 +135,10 @@ public class Md3lbt {
         snapHelper = new CarouselSnapHelper();
         snapHelper.attachToRecyclerView(recyclerView);
 
-        adapter = new CarouselAdapter(imageUrls);
+        adapter = new CarouselAdapter(
+                activity,
+                imageUrls
+        );
 
         recyclerView.setAdapter(adapter);
 
@@ -150,16 +151,7 @@ public class Md3lbt {
     }
 
     /**
-     * 解析 JSON 数据
-     *
-     * 支持：
-     * ["url1", "url2"]
-     *
-     * {"images":["url1","url2"]}
-     *
-     * {"images":[{"url":"url1"}]}
-     *
-     * {"data":[{"image":"url1"}]}
+     * JSON 解析
      */
     private List<String> parseJson(String json) {
 
@@ -167,9 +159,9 @@ public class Md3lbt {
 
         try {
 
-            JSONArray array;
-
             String trimmed = json.trim();
+
+            JSONArray array;
 
             if (trimmed.startsWith("[")) {
 
@@ -177,7 +169,8 @@ public class Md3lbt {
 
             } else {
 
-                JSONObject object = new JSONObject(trimmed);
+                JSONObject object =
+                        new JSONObject(trimmed);
 
                 if (object.has("images")) {
                     array = object.getJSONArray("images");
@@ -190,7 +183,7 @@ public class Md3lbt {
 
                 } else {
                     throw new IllegalArgumentException(
-                            "JSON 对象中没有 images、data 或 list 数组"
+                            "没有找到 images、data 或 list 数组"
                     );
                 }
             }
@@ -207,23 +200,20 @@ public class Md3lbt {
 
                 } else if (item instanceof JSONObject) {
 
-                    JSONObject imageObject = (JSONObject) item;
+                    JSONObject obj = (JSONObject) item;
 
-                    imageUrl = imageObject.optString("url", null);
+                    imageUrl = obj.optString("url", "");
 
-                    if (imageUrl == null ||
-                            imageUrl.isEmpty()) {
-                        imageUrl = imageObject.optString("image", null);
+                    if (imageUrl.isEmpty()) {
+                        imageUrl = obj.optString("image", "");
                     }
 
-                    if (imageUrl == null ||
-                            imageUrl.isEmpty()) {
-                        imageUrl = imageObject.optString("imageUrl", null);
+                    if (imageUrl.isEmpty()) {
+                        imageUrl = obj.optString("imageUrl", "");
                     }
 
-                    if (imageUrl == null ||
-                            imageUrl.isEmpty()) {
-                        imageUrl = imageObject.optString("src", null);
+                    if (imageUrl.isEmpty()) {
+                        imageUrl = obj.optString("src", "");
                     }
                 }
 
@@ -237,7 +227,8 @@ public class Md3lbt {
         } catch (Exception e) {
 
             throw new IllegalArgumentException(
-                    "JSON 图片数据解析失败：" + e.getMessage(), e
+                    "JSON 解析失败：" + e.getMessage(),
+                    e
             );
         }
 
@@ -245,11 +236,11 @@ public class Md3lbt {
     }
 
     /**
-     * 设置滑动监听
+     * 滚动监听
      */
     private void setupScrollListener() {
 
-        recyclerView.addOnScrollListener(
+        scrollListener =
                 new RecyclerView.OnScrollListener() {
 
             @Override
@@ -270,11 +261,13 @@ public class Md3lbt {
                     startAutoPlay();
                 }
             }
-        });
+        };
+
+        recyclerView.addOnScrollListener(scrollListener);
     }
 
     /**
-     * 获取当前居中的卡片位置
+     * 更新当前居中位置
      */
     private void updateCurrentPosition() {
 
@@ -284,12 +277,12 @@ public class Md3lbt {
             return;
         }
 
-        View snapView = snapHelper.findSnapView(layoutManager);
+        View view = snapHelper.findSnapView(layoutManager);
 
-        if (snapView != null) {
+        if (view != null) {
 
             int position =
-                    recyclerView.getChildAdapterPosition(snapView);
+                    recyclerView.getChildAdapterPosition(view);
 
             if (position != RecyclerView.NO_POSITION) {
                 currentPosition = position;
@@ -298,7 +291,7 @@ public class Md3lbt {
     }
 
     /**
-     * 启动自动播放
+     * 自动播放
      */
     private void startAutoPlay() {
 
@@ -316,9 +309,9 @@ public class Md3lbt {
             @Override
             public void run() {
 
-                if (recyclerView == null ||
-                        adapter == null ||
-                        !initialized) {
+                if (!initialized ||
+                        recyclerView == null ||
+                        adapter == null) {
                     return;
                 }
 
@@ -364,14 +357,30 @@ public class Md3lbt {
     }
 
     /**
-     * 停止轮播并释放引用
-     * 建议在 Activity.onDestroy() 中调用
+     * 停止轮播
      */
     public void stop() {
 
         stopAutoPlay();
 
         initialized = false;
+
+        if (recyclerView != null &&
+                scrollListener != null) {
+
+            recyclerView.removeOnScrollListener(
+                    scrollListener
+            );
+
+            scrollListener = null;
+        }
+
+        if (adapter != null) {
+
+            adapter.release();
+
+            adapter = null;
+        }
     }
 
     /**
@@ -385,22 +394,32 @@ public class Md3lbt {
      * 获取图片数量
      */
     public int getItemCount() {
-        return adapter == null ? 0 : adapter.getItemCount();
+        return adapter == null
+                ? 0
+                : adapter.getItemCount();
     }
 
     /**
      * RecyclerView 适配器
      */
-    private class CarouselAdapter
+    private static class CarouselAdapter
             extends RecyclerView.Adapter<CarouselAdapter.ViewHolder> {
+
+        private final Activity activity;
 
         private final List<String> imageUrls;
 
-        private final Map<String, Bitmap> imageCache =
-                new ConcurrentHashMap<>();
+        private final ImageLoader imageLoader;
 
-        CarouselAdapter(List<String> imageUrls) {
+        CarouselAdapter(
+                Activity activity,
+                List<String> imageUrls) {
+
+            this.activity = activity;
+
             this.imageUrls = imageUrls;
+
+            this.imageLoader = new ImageLoader();
         }
 
         @Override
@@ -489,6 +508,12 @@ public class Md3lbt {
 
             holder.imageView.setTag(imageUrl);
 
+            holder.imageView.setImageDrawable(null);
+
+            holder.imageView.setBackgroundColor(
+                    0xFFE0E0E0
+            );
+
             holder.maskableFrame.setOnMaskChangedListener(
                     maskRect -> {
 
@@ -499,39 +524,27 @@ public class Md3lbt {
                             (float) holder.maskableFrame.getWidth();
 
                     float scale =
-                            1f - (progress * 0.15f);
+                            1f - progress * 0.15f;
 
                     holder.itemView.setScaleX(scale);
                     holder.itemView.setScaleY(scale);
                 }
             });
 
-            Bitmap cachedBitmap = imageCache.get(imageUrl);
+            imageLoader.load(
+                    imageUrl,
+                    holder.imageView
+            );
+        }
 
-            if (cachedBitmap != null) {
+        @Override
+        public void onViewRecycled(ViewHolder holder) {
 
-                holder.imageView.setImageBitmap(cachedBitmap);
+            holder.imageView.setTag(null);
 
-                holder.imageView.setBackgroundColor(
-                        0x00000000
-                );
+            holder.imageView.setImageDrawable(null);
 
-            } else {
-
-                holder.imageView.setImageDrawable(null);
-
-                holder.imageView.setBackgroundColor(
-                        0xFFE0E0E0
-                );
-
-                new LoadImageTask(
-                        holder.imageView,
-                        imageUrl,
-                        imageCache
-                ).executeOnExecutor(
-                        AsyncTask.THREAD_POOL_EXECUTOR
-                );
-            }
+            super.onViewRecycled(holder);
         }
 
         @Override
@@ -548,7 +561,12 @@ public class Md3lbt {
             );
         }
 
-        class ViewHolder extends RecyclerView.ViewHolder {
+        void release() {
+            imageLoader.shutdown();
+        }
+
+        static class ViewHolder
+                extends RecyclerView.ViewHolder {
 
             MaskableFrameLayout maskableFrame;
 
@@ -561,79 +579,283 @@ public class Md3lbt {
                 super(frame);
 
                 this.maskableFrame = frame;
+
                 this.imageView = imageView;
             }
         }
     }
 
     /**
-     * 网络图片异步加载
+     * 全新网络图片加载器
      */
-    private static class LoadImageTask
-            extends AsyncTask<String, Void, Bitmap> {
+    private static class ImageLoader {
 
-        private final WeakReference<ImageView> imageReference;
+        /**
+         * 四线程图片下载
+         */
+        private final ExecutorService executor =
+                Executors.newFixedThreadPool(4);
 
-        private final String imageUrl;
+        /**
+         * 主线程更新 UI
+         */
+        private final Handler mainHandler =
+                new Handler(Looper.getMainLooper());
 
-        private final Map<String, Bitmap> cache;
+        /**
+         * 图片内存缓存
+         */
+        private final LruCache<String, Bitmap> memoryCache;
 
-        LoadImageTask(
-                ImageView imageView,
-                String imageUrl,
-                Map<String, Bitmap> cache) {
+        ImageLoader() {
 
-            this.imageReference =
-                    new WeakReference<>(imageView);
+            int maxMemory =
+                    (int) (Runtime.getRuntime().maxMemory() / 1024);
 
-            this.imageUrl = imageUrl;
+            int cacheSize = maxMemory / 8;
 
-            this.cache = cache;
+            memoryCache = new LruCache<String, Bitmap>(
+                    cacheSize
+            ) {
+
+                @Override
+                protected int sizeOf(
+                        String key,
+                        Bitmap bitmap) {
+
+                    return bitmap.getByteCount() / 1024;
+                }
+            };
         }
 
-        @Override
-        protected Bitmap doInBackground(String... urls) {
+        /**
+         * 加载图片
+         */
+        void load(
+                String imageUrl,
+                ImageView imageView) {
+
+            if (imageUrl == null ||
+                    imageUrl.trim().isEmpty()) {
+                return;
+            }
+
+            imageView.setTag(imageUrl);
+
+            // 先从内存缓存读取
+            Bitmap cached = memoryCache.get(imageUrl);
+
+            if (cached != null &&
+                    !cached.isRecycled()) {
+
+                imageView.setImageBitmap(cached);
+
+                imageView.setBackgroundColor(
+                        0x00000000
+                );
+
+                return;
+            }
+
+            // 缓存不存在，开始网络下载
+            try {
+
+                executor.execute(() -> {
+
+                    Bitmap bitmap = download(imageUrl);
+
+                    if (bitmap == null) {
+                        return;
+                    }
+
+                    memoryCache.put(imageUrl, bitmap);
+
+                    mainHandler.post(() -> {
+
+                        Object tag = imageView.getTag();
+
+                        // 防止 RecyclerView 复用导致图片错位
+                        if (imageUrl.equals(tag)) {
+
+                            imageView.setImageBitmap(bitmap);
+
+                            imageView.setBackgroundColor(
+                                    0x00000000
+                            );
+                        }
+                    });
+                });
+
+            } catch (Exception e) {
+
+                Log.e(TAG, "图片任务提交失败：" + imageUrl, e);
+            }
+        }
+
+        /**
+         * 下载并解码图片
+         */
+        private Bitmap download(String imageUrl) {
 
             HttpURLConnection connection = null;
 
             try {
 
-                URL url = new URL(urls[0]);
+                URL url = new URL(imageUrl);
 
                 connection =
                         (HttpURLConnection) url.openConnection();
 
+                // 允许重定向
+                connection.setInstanceFollowRedirects(true);
+
+                // 请求方式
                 connection.setRequestMethod("GET");
 
-                connection.setConnectTimeout(10000);
+                // 超时时间
+                connection.setConnectTimeout(15000);
 
-                connection.setReadTimeout(10000);
+                connection.setReadTimeout(20000);
 
-                connection.setDoInput(true);
+                // 请求头
+                connection.setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
+                );
+
+                connection.setRequestProperty(
+                        "Accept",
+                        "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+                );
+
+                connection.setRequestProperty(
+                        "Connection",
+                        "Keep-Alive"
+                );
+
+                connection.setUseCaches(true);
 
                 connection.connect();
 
-                if (connection.getResponseCode() !=
+                int responseCode =
+                        connection.getResponseCode();
+
+                Log.d(
+                        TAG,
+                        "图片请求：" + imageUrl +
+                        "，HTTP状态：" + responseCode
+                );
+
+                if (responseCode !=
                         HttpURLConnection.HTTP_OK) {
+
+                    Log.e(
+                            TAG,
+                            "图片请求失败，HTTP状态：" + responseCode
+                    );
+
+                    return null;
+                }
+
+                String contentType =
+                        connection.getContentType();
+
+                if (contentType != null &&
+                        !contentType.toLowerCase().startsWith("image/")) {
+
+                    Log.e(
+                            TAG,
+                            "返回内容不是图片：" + contentType
+                    );
+
                     return null;
                 }
 
                 try (InputStream input =
-                             connection.getInputStream()) {
+                             connection.getInputStream();
+
+                     ByteArrayOutputStream output =
+                             new ByteArrayOutputStream()) {
+
+                    byte[] buffer = new byte[8192];
+
+                    int length;
+
+                    while ((length = input.read(buffer)) != -1) {
+
+                        output.write(buffer, 0, length);
+                    }
+
+                    byte[] imageBytes = output.toByteArray();
+
+                    if (imageBytes.length == 0) {
+
+                        Log.e(TAG, "图片数据为空：" + imageUrl);
+
+                        return null;
+                    }
+
+                    BitmapFactory.Options options =
+                            new BitmapFactory.Options();
+
+                    options.inJustDecodeBounds = true;
+
+                    BitmapFactory.decodeByteArray(
+                            imageBytes,
+                            0,
+                            imageBytes.length,
+                            options
+                    );
+
+                    if (options.outWidth <= 0 ||
+                            options.outHeight <= 0) {
+
+                        Log.e(TAG, "图片解码失败：" + imageUrl);
+
+                        return null;
+                    }
+
+                    // 根据图片尺寸进行采样，减少内存占用
+                    options.inJustDecodeBounds = false;
+
+                    options.inSampleSize = calculateSampleSize(
+                            options.outWidth,
+                            options.outHeight
+                    );
+
+                    options.inPreferredConfig =
+                            Bitmap.Config.RGB_565;
 
                     Bitmap bitmap =
-                            BitmapFactory.decodeStream(input);
+                            BitmapFactory.decodeByteArray(
+                                    imageBytes,
+                                    0,
+                                    imageBytes.length,
+                                    options
+                            );
 
-                    if (bitmap != null) {
-                        cache.put(imageUrl, bitmap);
+                    if (bitmap == null) {
+
+                        Log.e(TAG, "Bitmap 创建失败：" + imageUrl);
+
+                        return null;
                     }
+
+                    Log.d(
+                            TAG,
+                            "图片加载成功：" + imageUrl
+                    );
 
                     return bitmap;
                 }
 
             } catch (Exception e) {
 
-                e.printStackTrace();
+                Log.e(
+                        TAG,
+                        "网络图片加载异常：" + imageUrl,
+                        e
+                );
 
                 return null;
 
@@ -645,27 +867,36 @@ public class Md3lbt {
             }
         }
 
-        @Override
-        protected void onPostExecute(Bitmap bitmap) {
+        /**
+         * 计算图片采样比例
+         */
+        private int calculateSampleSize(
+                int width,
+                int height) {
 
-            ImageView imageView =
-                    imageReference.get();
+            int sampleSize = 1;
 
-            if (imageView == null ||
-                    bitmap == null) {
-                return;
+            int maxSize = 1600;
+
+            while (width / sampleSize > maxSize ||
+                    height / sampleSize > maxSize) {
+
+                sampleSize *= 2;
             }
 
-            Object tag = imageView.getTag();
+            return sampleSize;
+        }
 
-            if (imageUrl.equals(tag)) {
+        /**
+         * 释放线程池
+         */
+        void shutdown() {
 
-                imageView.setImageBitmap(bitmap);
+            executor.shutdownNow();
 
-                imageView.setBackgroundColor(
-                        0x00000000
-                );
-            }
+            mainHandler.removeCallbacksAndMessages(null);
+
+            memoryCache.evictAll();
         }
     }
 }
