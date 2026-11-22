@@ -34,70 +34,55 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Md3lbt
+ * MD3 JSON 轮播图控件
  *
- * Material Design 3 JSON 轮播图控件
+ * 继承 RecyclerView
  *
- * 功能：
- * 1. 直接继承 RecyclerView
- * 2. 支持 JSON 字符串加载
- * 3. 支持 raw JSON 文件加载
- * 4. 支持字符串数组和对象数组
- * 5. 网络图片异步加载
- * 6. LruCache 图片缓存
- * 7. 多线程图片加载
- * 8. MD3 Carousel 遮罩效果
- * 9. 圆角图片
- * 10. 自动循环播放
- * 11. 用户操作自动暂停
+ * 保留原版 MD3 Carousel 视觉效果：
+ * 1. 中心卡片较大
+ * 2. 两侧卡片较小
+ * 3. 边缘遮罩动画
+ * 4. 圆角卡片
+ * 5. 自动轮播
  *
- * Author: Md3lbt
+ * 优化：
+ * 1. JSON 数据解析
+ * 2. 线程池图片加载
+ * 3. LruCache 图片缓存
+ * 4. 防止图片错位
+ * 5. 网络异常处理
  */
 public class Md3lbt extends RecyclerView {
 
-    // ==============================
-    // 基础配置
-    // ==============================
+    private static final long DEFAULT_INTERVAL = 3000;
 
-    private static final long AUTO_PLAY_INTERVAL = 3000;
-
-    private static final int ITEM_WIDTH_DP = 220;
+    private static final int ITEM_WIDTH_DP = 100;
 
     private static final int CORNER_RADIUS_DP = 16;
 
     private static final int ITEM_MARGIN_DP = 8;
 
-    // ==============================
-    // 自动播放
-    // ==============================
-
     private final Handler handler =
             new Handler(Looper.getMainLooper());
-
-    private Runnable autoPlayRunnable;
-
-    private boolean autoPlayEnabled = true;
-
-    private int currentPosition = 0;
-
-    // ==============================
-    // 图片加载
-    // ==============================
 
     private final ExecutorService imageExecutor =
             Executors.newFixedThreadPool(3);
 
     private final LruCache<String, Bitmap> imageCache;
 
-    // ==============================
-    // 轮播组件
-    // ==============================
-
     private CarouselSnapHelper snapHelper;
 
     private CarouselAdapter adapter;
 
+    private Runnable autoPlayRunnable;
+
+    private long autoPlayInterval = DEFAULT_INTERVAL;
+
+    private boolean autoPlayEnabled = true;
+
     private boolean released = false;
+
+    private int currentPosition = 0;
 
     // ==============================
     // 构造方法
@@ -125,27 +110,6 @@ public class Md3lbt extends RecyclerView {
         init();
     }
 
-    /**
-     * 创建图片缓存
-     */
-    private LruCache<String, Bitmap> createImageCache() {
-
-        int maxMemory = (int) (
-                Runtime.getRuntime().maxMemory() / 1024
-        );
-
-        int cacheSize = maxMemory / 8;
-
-        return new LruCache<String, Bitmap>(cacheSize) {
-
-            @Override
-            protected int sizeOf(String key, Bitmap bitmap) {
-
-                return bitmap.getByteCount() / 1024;
-            }
-        };
-    }
-
     // ==============================
     // 初始化
     // ==============================
@@ -156,14 +120,10 @@ public class Md3lbt extends RecyclerView {
 
         setClipToPadding(false);
 
-        setHasFixedSize(true);
-
-        // 初始化吸附助手
         snapHelper = new CarouselSnapHelper();
 
         snapHelper.attachToRecyclerView(this);
 
-        // 监听用户滑动
         addOnScrollListener(new OnScrollListener() {
 
             @Override
@@ -173,15 +133,12 @@ public class Md3lbt extends RecyclerView {
 
                 if (newState == SCROLL_STATE_DRAGGING) {
 
-                    // 用户正在拖动
                     stopAutoPlay();
 
                 } else if (newState == SCROLL_STATE_IDLE) {
 
-                    // 滑动完成
                     updateCurrentPosition();
 
-                    // 恢复自动播放
                     startAutoPlay();
                 }
             }
@@ -189,35 +146,65 @@ public class Md3lbt extends RecyclerView {
     }
 
     // ==============================
-    // JSON 加载入口
+    // 图片缓存
+    // ==============================
+
+    private LruCache<String, Bitmap> createImageCache() {
+
+        int maxMemory = (int) (
+                Runtime.getRuntime().maxMemory() / 1024
+        );
+
+        return new LruCache<String, Bitmap>(maxMemory / 8) {
+
+            @Override
+            protected int sizeOf(String key, Bitmap bitmap) {
+
+                return bitmap.getByteCount() / 1024;
+            }
+        };
+    }
+
+    // ==============================
+    // JSON 加载
     // ==============================
 
     /**
      * 加载 JSON 字符串
      *
-     * @param layoutManager MD3 布局管理器
-     * @param json JSON 数据
+     * 支持：
+     * ["url1","url2"]
+     *
+     * [{"url":"url1"},{"url":"url2"}]
+     *
+     * {"images":[{"url":"url1"}]}
+     */
+    public void qd(String json) {
+
+        qd(new CarouselLayoutManager(), json);
+    }
+
+    /**
+     * 自定义 CarouselLayoutManager
      */
     public void qd(
             CarouselLayoutManager layoutManager,
             String json) {
 
         if (released) {
-            throw new IllegalStateException(
-                    "Md3lbt 已释放，不能继续使用"
-            );
+            throw new IllegalStateException("控件已经释放");
         }
 
         if (layoutManager == null) {
-            throw new IllegalArgumentException(
-                    "CarouselLayoutManager 不能为空"
-            );
+            throw new IllegalArgumentException("布局管理器不能为空");
         }
 
         List<ImageItem> items = parseJson(json);
 
+        // 保留原生 Carousel 布局管理器
         setLayoutManager(layoutManager);
 
+        // 创建适配器
         adapter = new CarouselAdapter(
                 getContext(),
                 items,
@@ -233,32 +220,7 @@ public class Md3lbt extends RecyclerView {
     }
 
     /**
-     * 使用默认 MD3 布局管理器加载
-     *
-     * @param json JSON 数据
-     */
-    public void qd(String json) {
-
-        qd(new CarouselLayoutManager(), json);
-    }
-
-    /**
-     * 从 res/raw 读取 JSON 文件
-     *
-     * @param layoutManager MD3 布局管理器
-     * @param rawResId R.raw 文件资源 ID
-     */
-    public void qdFromRaw(
-            CarouselLayoutManager layoutManager,
-            int rawResId) {
-
-        String json = readRawJson(rawResId);
-
-        qd(layoutManager, json);
-    }
-
-    /**
-     * 使用默认布局管理器读取 raw JSON
+     * 从 res/raw 加载 JSON
      */
     public void qdFromRaw(int rawResId) {
 
@@ -268,21 +230,23 @@ public class Md3lbt extends RecyclerView {
         );
     }
 
+    /**
+     * 自定义布局管理器并从 raw 加载
+     */
+    public void qdFromRaw(
+            CarouselLayoutManager layoutManager,
+            int rawResId) {
+
+        qd(
+                layoutManager,
+                readRawJson(rawResId)
+        );
+    }
+
     // ==============================
     // JSON 解析
     // ==============================
 
-    /**
-     * 解析 JSON
-     *
-     * 支持：
-     *
-     * ["url1", "url2"]
-     *
-     * [{"url":"url1"}, {"url":"url2"}]
-     *
-     * {"images":[{"url":"url1"}]}
-     */
     private List<ImageItem> parseJson(String json) {
 
         if (json == null || json.trim().isEmpty()) {
@@ -311,9 +275,8 @@ public class Md3lbt extends RecyclerView {
                 }
 
                 if (array == null) {
-
                     throw new IllegalArgumentException(
-                            "JSON 对象必须包含 images 或 data 数组"
+                            "JSON 缺少 images 或 data 数组"
                     );
                 }
 
@@ -326,40 +289,35 @@ public class Md3lbt extends RecyclerView {
 
                 Object object = array.opt(i);
 
-                String imageUrl = null;
+                String url = "";
 
                 String title = "";
 
                 if (object instanceof String) {
 
-                    imageUrl = (String) object;
+                    url = (String) object;
 
                 } else if (object instanceof JSONObject) {
 
                     JSONObject item = (JSONObject) object;
 
-                    // 兼容多种图片地址字段
-                    imageUrl = item.optString("url", "");
+                    url = item.optString("url", "");
 
-                    if (imageUrl.isEmpty()) {
-                        imageUrl = item.optString("imageUrl", "");
+                    if (url.isEmpty()) {
+                        url = item.optString("imageUrl", "");
                     }
 
-                    if (imageUrl.isEmpty()) {
-                        imageUrl = item.optString("image", "");
+                    if (url.isEmpty()) {
+                        url = item.optString("image", "");
                     }
 
                     title = item.optString("title", "");
                 }
 
-                if (imageUrl != null
-                        && !imageUrl.trim().isEmpty()) {
+                if (!url.trim().isEmpty()) {
 
                     result.add(
-                            new ImageItem(
-                                    imageUrl.trim(),
-                                    title
-                            )
+                            new ImageItem(url.trim(), title)
                     );
                 }
             }
@@ -376,15 +334,17 @@ public class Md3lbt extends RecyclerView {
     }
 
     /**
-     * 读取 raw JSON 文件
+     * 读取 raw JSON
      */
     private String readRawJson(int rawResId) {
 
-        try (InputStream input =
-                     getResources().openRawResource(rawResId);
+        try (
+                InputStream input =
+                        getResources().openRawResource(rawResId);
 
-             ByteArrayOutputStream output =
-                     new ByteArrayOutputStream()) {
+                ByteArrayOutputStream output =
+                        new ByteArrayOutputStream()
+        ) {
 
             byte[] buffer = new byte[4096];
 
@@ -400,14 +360,14 @@ public class Md3lbt extends RecyclerView {
         } catch (Exception e) {
 
             throw new IllegalArgumentException(
-                    "读取 raw JSON 失败：" + e.getMessage(),
+                    "读取 JSON 失败：" + e.getMessage(),
                     e
             );
         }
     }
 
     // ==============================
-    // 图片数据模型
+    // 图片数据
     // ==============================
 
     private static class ImageItem {
@@ -425,12 +385,9 @@ public class Md3lbt extends RecyclerView {
     }
 
     // ==============================
-    // 自动播放
+    // 自动轮播
     // ==============================
 
-    /**
-     * 开始自动播放
-     */
     public void startAutoPlay() {
 
         stopAutoPlay();
@@ -448,11 +405,7 @@ public class Md3lbt extends RecyclerView {
             @Override
             public void run() {
 
-                if (released || !autoPlayEnabled) {
-                    return;
-                }
-
-                if (adapter == null) {
+                if (released || !autoPlayEnabled || adapter == null) {
                     return;
                 }
 
@@ -462,35 +415,28 @@ public class Md3lbt extends RecyclerView {
                     return;
                 }
 
-                // 获取当前中心位置
                 updateCurrentPosition();
 
-                // 计算下一页
                 int nextPosition =
                         (currentPosition + 1) % count;
 
-                // 平滑滚动
                 smoothScrollToPosition(nextPosition);
 
                 currentPosition = nextPosition;
 
-                // 继续轮播
                 handler.postDelayed(
                         this,
-                        AUTO_PLAY_INTERVAL
+                        autoPlayInterval
                 );
             }
         };
 
         handler.postDelayed(
                 autoPlayRunnable,
-                AUTO_PLAY_INTERVAL
+                autoPlayInterval
         );
     }
 
-    /**
-     * 停止自动播放
-     */
     public void stopAutoPlay() {
 
         if (autoPlayRunnable != null) {
@@ -501,75 +447,52 @@ public class Md3lbt extends RecyclerView {
         }
     }
 
-    /**
-     * 设置自动播放开关
-     */
     public void setAutoPlayEnabled(boolean enabled) {
 
         autoPlayEnabled = enabled;
 
         if (enabled) {
-
             startAutoPlay();
-
         } else {
-
             stopAutoPlay();
         }
     }
 
-    /**
-     * 设置轮播间隔
-     */
     public void setAutoPlayInterval(long interval) {
 
-        // 此方法修改默认间隔
-        // 使用 setAutoPlayEnabled 可重新启动轮播
         if (interval <= 0) {
             throw new IllegalArgumentException(
-                    "轮播间隔必须大于 0"
+                    "轮播时间必须大于0"
             );
         }
 
-        // 由实例字段保存
         autoPlayInterval = interval;
 
         startAutoPlay();
     }
 
-    private long autoPlayInterval = AUTO_PLAY_INTERVAL;
-
     // ==============================
-    // 当前页码
+    // 当前页面
     // ==============================
 
-    /**
-     * 更新中心位置
-     */
     private void updateCurrentPosition() {
 
         if (snapHelper == null || getLayoutManager() == null) {
             return;
         }
 
-        View snapView = snapHelper.findSnapView(
-                getLayoutManager()
-        );
+        View view = snapHelper.findSnapView(getLayoutManager());
 
-        if (snapView != null) {
+        if (view != null) {
 
-            int position = getChildAdapterPosition(snapView);
+            int position = getChildAdapterPosition(view);
 
             if (position != NO_POSITION) {
-
                 currentPosition = position;
             }
         }
     }
 
-    /**
-     * 获取当前页码
-     */
     public int getCurrentPosition() {
 
         updateCurrentPosition();
@@ -577,17 +500,13 @@ public class Md3lbt extends RecyclerView {
         return currentPosition;
     }
 
-    /**
-     * 手动切换页面
-     */
     public void setCurrentPosition(int position) {
 
         if (adapter == null) {
             return;
         }
 
-        if (position < 0
-                || position >= adapter.getItemCount()) {
+        if (position < 0 || position >= adapter.getItemCount()) {
             return;
         }
 
@@ -600,25 +519,13 @@ public class Md3lbt extends RecyclerView {
     // 缓存管理
     // ==============================
 
-    /**
-     * 清空图片缓存
-     */
     public void clearImageCache() {
 
         imageCache.evictAll();
 
         if (adapter != null) {
-
             adapter.notifyDataSetChanged();
         }
-    }
-
-    /**
-     * 获取缓存图片数量
-     */
-    public int getImageCacheCount() {
-
-        return imageCache.size();
     }
 
     // ==============================
@@ -639,16 +546,10 @@ public class Md3lbt extends RecyclerView {
         super.onAttachedToWindow();
 
         if (adapter != null && autoPlayEnabled) {
-
             startAutoPlay();
         }
     }
 
-    /**
-     * 完全释放控件
-     *
-     * Activity 销毁时调用
-     */
     public void release() {
 
         if (released) {
@@ -675,12 +576,10 @@ public class Md3lbt extends RecyclerView {
         imageExecutor.shutdownNow();
 
         imageCache.evictAll();
-
-        currentPosition = 0;
     }
 
     // ==============================
-    // RecyclerView 适配器
+    // MD3 Carousel Adapter
     // ==============================
 
     private static class CarouselAdapter
@@ -710,7 +609,12 @@ public class Md3lbt extends RecyclerView {
 
             this.executor = executor;
 
-            itemWidthPx = dpToPx(context, ITEM_WIDTH_DP);
+            float density = context.getResources()
+                    .getDisplayMetrics().density;
+
+            itemWidthPx = (int) (
+                    ITEM_WIDTH_DP * density + 0.5f
+            );
         }
 
         @Override
@@ -718,8 +622,8 @@ public class Md3lbt extends RecyclerView {
                 ViewGroup parent,
                 int viewType) {
 
-            // MD3 遮罩容器
-            MaskableFrameLayout frame =
+            // 保留原版 MD3 遮罩容器
+            MaskableFrameLayout maskableFrame =
                     new MaskableFrameLayout(context);
 
             RecyclerView.LayoutParams params =
@@ -728,49 +632,47 @@ public class Md3lbt extends RecyclerView {
                             ViewGroup.LayoutParams.MATCH_PARENT
                     );
 
-            int margin = dpToPx(context, ITEM_MARGIN_DP);
+            int marginPx = dpToPx(context, ITEM_MARGIN_DP);
 
             params.setMargins(
-                    margin,
+                    marginPx,
                     0,
-                    margin,
+                    marginPx,
                     0
             );
 
-            frame.setLayoutParams(params);
+            maskableFrame.setLayoutParams(params);
 
-            // 设置圆角
-            float radius = dpToPx(
-                    context,
-                    CORNER_RADIUS_DP
-            );
+            // 保留原版圆角
+            float cornerRadius =
+                    dpToPx(context, CORNER_RADIUS_DP);
 
             ShapeAppearanceModel shape =
                     ShapeAppearanceModel.builder()
                             .setAllCorners(
                                     CornerFamily.ROUNDED,
-                                    radius
+                                    cornerRadius
                             )
                             .build();
 
-            frame.setShapeAppearanceModel(shape);
+            maskableFrame.setShapeAppearanceModel(shape);
 
-            // 创建图片控件
-            ImageView image = new ImageView(context);
+            // 图片控件
+            ImageView imageView = new ImageView(context);
 
-            image.setScaleType(
+            imageView.setScaleType(
                     ImageView.ScaleType.CENTER_CROP
             );
 
-            image.setLayoutParams(
+            imageView.setLayoutParams(
                     new ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                     )
             );
 
-            // 图片圆角
-            image.setOutlineProvider(
+            // 圆角裁剪
+            imageView.setOutlineProvider(
                     new ViewOutlineProvider() {
 
                         @Override
@@ -783,17 +685,20 @@ public class Md3lbt extends RecyclerView {
                                     0,
                                     view.getWidth(),
                                     view.getHeight(),
-                                    radius
+                                    cornerRadius
                             );
                         }
                     }
             );
 
-            image.setClipToOutline(true);
+            imageView.setClipToOutline(true);
 
-            frame.addView(image);
+            maskableFrame.addView(imageView);
 
-            return new ViewHolder(frame, image);
+            return new ViewHolder(
+                    maskableFrame,
+                    imageView
+            );
         }
 
         @Override
@@ -805,15 +710,35 @@ public class Md3lbt extends RecyclerView {
 
             String imageUrl = item.url;
 
-            // 记录当前 URL，防止图片错位
             holder.imageView.setTag(imageUrl);
 
-            // 设置占位背景
-            holder.imageView.setImageDrawable(null);
+            // ==============================
+            // 保留原版遮罩缩放机制
+            // ==============================
 
-            holder.imageView.setBackgroundColor(0xFFEAEAEA);
+            holder.maskableFrame.setOnMaskChangedListener(
+                    maskRect -> {
 
-            // 先读取缓存
+                        if (holder.maskableFrame.getWidth() > 0) {
+
+                            float maskProgress =
+                                    maskRect.left /
+                                    (float) holder.maskableFrame.getWidth();
+
+                            float scale =
+                                    1f - (maskProgress * 0.15f);
+
+                            holder.itemView.setScaleX(scale);
+
+                            holder.itemView.setScaleY(scale);
+                        }
+                    }
+            );
+
+            // ==============================
+            // 图片缓存
+            // ==============================
+
             Bitmap bitmap = cache.get(imageUrl);
 
             if (bitmap != null) {
@@ -825,59 +750,50 @@ public class Md3lbt extends RecyclerView {
                 return;
             }
 
-            // 异步加载图片
-            executor.execute(() -> {
-
-                Bitmap result = loadBitmap(imageUrl);
-
-                if (result == null) {
-                    return;
-                }
-
-                // 写入缓存
-                cache.put(imageUrl, result);
-
-                // 回到主线程更新界面
-                holder.imageView.post(() -> {
-
-                    Object tag = holder.imageView.getTag();
-
-                    if (imageUrl.equals(tag)) {
-
-                        holder.imageView.setImageBitmap(result);
-
-                        holder.imageView.setBackgroundColor(
-                                0x00000000
-                        );
-                    }
-                });
-            });
-        }
-
-        @Override
-        public void onViewRecycled(ViewHolder holder) {
-
-            holder.imageView.setTag(null);
-
             holder.imageView.setImageDrawable(null);
 
-            super.onViewRecycled(holder);
+            holder.imageView.setBackgroundColor(0xFFE0E0E0);
+
+            // ==============================
+            // 异步加载图片
+            // ==============================
+
+            try {
+
+                executor.execute(() -> {
+
+                    Bitmap result = loadImage(imageUrl);
+
+                    if (result == null) {
+                        return;
+                    }
+
+                    cache.put(imageUrl, result);
+
+                    holder.imageView.post(() -> {
+
+                        Object tag = holder.imageView.getTag();
+
+                        if (imageUrl.equals(tag)) {
+
+                            holder.imageView.setImageBitmap(result);
+
+                            holder.imageView.setBackgroundColor(
+                                    0x00000000
+                            );
+                        }
+                    });
+                });
+
+            } catch (Exception ignored) {
+                // 线程池已关闭
+            }
         }
-
-        @Override
-        public int getItemCount() {
-
-            return items.size();
-        }
-
-        // ==============================
-        // 图片加载
-        // ==============================
 
         /**
-         * 加载网络图片
+         * 网络图片加载
          */
-        private static Bitmap loadBitmap(String imageUrl) {
+        private static Bitmap loadImage(String imageUrl) {
 
             HttpURLConnection connection = null;
 
@@ -888,13 +804,9 @@ public class Md3lbt extends RecyclerView {
                 connection = (HttpURLConnection)
                         url.openConnection();
 
-                connection.setRequestMethod("GET");
-
                 connection.setConnectTimeout(8000);
 
                 connection.setReadTimeout(10000);
-
-                connection.setInstanceFollowRedirects(true);
 
                 connection.setDoInput(true);
 
@@ -902,7 +814,6 @@ public class Md3lbt extends RecyclerView {
 
                 if (connection.getResponseCode()
                         != HttpURLConnection.HTTP_OK) {
-
                     return null;
                 }
 
@@ -921,34 +832,31 @@ public class Md3lbt extends RecyclerView {
             } finally {
 
                 if (connection != null) {
-
                     connection.disconnect();
                 }
             }
         }
 
-        /**
-         * dp 转 px
-         */
         private static int dpToPx(
                 Context context,
                 int dp) {
 
-            float density = context.getResources()
-                    .getDisplayMetrics().density;
-
             return (int) (
-                    dp * density + 0.5f
+                    dp * context.getResources()
+                            .getDisplayMetrics().density
+                            + 0.5f
             );
         }
 
-        // ==============================
-        // ViewHolder
-        // ==============================
+        @Override
+        public int getItemCount() {
+
+            return items.size();
+        }
 
         static class ViewHolder extends RecyclerView.ViewHolder {
 
-            final MaskableFrameLayout frame;
+            final MaskableFrameLayout maskableFrame;
 
             final ImageView imageView;
 
@@ -958,7 +866,7 @@ public class Md3lbt extends RecyclerView {
 
                 super(frame);
 
-                this.frame = frame;
+                this.maskableFrame = frame;
 
                 this.imageView = imageView;
             }
